@@ -9,6 +9,7 @@ import json
 import os
 import csv
 import logging
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -47,6 +48,8 @@ class DataLogger:
                     motion_detected INTEGER,
                     light_lux REAL,
                     raw_json TEXT,
+                    payload_hash TEXT,
+                    reading_complete INTEGER DEFAULT 1,
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP
                 );
 
@@ -97,18 +100,39 @@ class DataLogger:
                 CREATE INDEX IF NOT EXISTS idx_detections_severity ON detection_results(overall_severity);
             """)
 
+        self._ensure_column("sensor_readings", "payload_hash", "TEXT")
+        self._ensure_column("sensor_readings", "reading_complete", "INTEGER DEFAULT 1")
+
+    def _ensure_column(self, table: str, column: str, definition: str):
+        existing = {row[1] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in existing:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            self.conn.commit()
+
     def log_reading(self, reading) -> int:
         r = reading.to_dict()
+
+        required_fields = [
+            "timestamp", "location_id", "temperature_c", "salinity_ppt",
+            "dissolved_oxygen_mgl", "turbidity_ntu", "ph", "depth_m",
+            "acoustic_activity", "motion_detected", "light_lux"
+        ]
+        reading_complete = all(r.get(field) is not None for field in required_fields)
+
+        canonical_payload = json.dumps(r, sort_keys=True, separators=(",", ":"))
+        payload_hash = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+
         cursor = self.conn.execute("""
             INSERT INTO sensor_readings 
             (timestamp, location_id, temperature_c, salinity_ppt, dissolved_oxygen_mgl,
-             turbidity_ntu, ph, depth_m, acoustic_activity, motion_detected, light_lux, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             turbidity_ntu, ph, depth_m, acoustic_activity, motion_detected, light_lux, raw_json,
+             payload_hash, reading_complete)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             r["timestamp"], r["location_id"], r["temperature_c"], r["salinity_ppt"],
             r["dissolved_oxygen_mgl"], r["turbidity_ntu"], r["ph"], r["depth_m"],
             r["acoustic_activity"], int(r["motion_detected"]), r["light_lux"],
-            reading.to_json()
+            canonical_payload, payload_hash, int(reading_complete)
         ))
         self.conn.commit()
         return cursor.lastrowid
