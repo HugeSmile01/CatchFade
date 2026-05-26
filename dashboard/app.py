@@ -37,6 +37,29 @@ state = {
     "running": False,
 }
 
+DEFAULT_READING = {
+    "timestamp": None,
+    "location_id": "--",
+    "temperature_c": 0.0,
+    "salinity_ppt": 0.0,
+    "dissolved_oxygen_mgl": 0.0,
+    "ph": 0.0,
+    "turbidity_ntu": 0.0,
+    "depth_m": 0.0,
+    "acoustic_activity": 0.0,
+    "motion_detected": False,
+    "light_lux": 0.0,
+}
+
+DEFAULT_DETECTION = {
+    "overall_severity": "NORMAL",
+    "scarcity_score": 0.0,
+    "stress_index": 0.0,
+    "anomalies": [],
+    "species_activity_low": False,
+    "habitat_stable": True,
+}
+
 manager = SensorManager(simulated=True)
 detector = AnomalyDetector()
 generator = EcologicalBriefingGenerator(provider="mock")
@@ -196,8 +219,12 @@ async function refresh() {
     const hist = await histRes.json();
     const brief = await briefRes.json();
 
-    const r = status.reading;
-    const d = status.detection;
+    const r = status.reading || {};
+    const d = status.detection || {};
+    if (!Object.keys(r).length || !Object.keys(d).length) {
+      document.getElementById('ts').textContent = new Date().toLocaleTimeString();
+      return;
+    }
     const sev = d.overall_severity;
 
     document.getElementById('ts').textContent = new Date().toLocaleTimeString();
@@ -276,9 +303,12 @@ def index():
 
 @app.route("/api/status")
 def api_status():
+    reading = state["latest_reading"] if state["latest_reading"] else DEFAULT_READING
+    detection = state["latest_result"] if state["latest_result"] else DEFAULT_DETECTION
     return jsonify({
-        "reading": state["latest_reading"],
-        "detection": state["latest_result"],
+        "reading": reading,
+        "detection": detection,
+        "has_live_data": bool(state["latest_reading"] and state["latest_result"]),
     })
 
 @app.route("/api/history")
@@ -292,6 +322,15 @@ def api_briefing():
 @app.route("/api/stats")
 def api_stats():
     return jsonify(db.get_stats())
+
+@app.route("/api/health")
+def api_health():
+    return jsonify({
+        "status": "ok",
+        "sensor_loop_running": state["running"],
+        "samples_captured": len(state["history"]),
+        "last_update": state["latest_reading"].get("timestamp") if state["latest_reading"] else None,
+    })
 
 # ─── Entry Point ───────────────────────────────────────────────────────────────
 
