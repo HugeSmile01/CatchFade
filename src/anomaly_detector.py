@@ -140,16 +140,16 @@ class AnomalyDetector:
         severity = None
         direction = ""
 
-        if config["crit_low"] and value <= config["crit_low"]:
+        if config["crit_low"] is not None and value <= config["crit_low"]:
             severity = SeverityLevel.CRITICAL
             direction = f"critically low ({value} ≤ {config['crit_low']})"
-        elif config["crit_high"] and value >= config["crit_high"]:
+        elif config["crit_high"] is not None and value >= config["crit_high"]:
             severity = SeverityLevel.CRITICAL
             direction = f"critically high ({value} ≥ {config['crit_high']})"
-        elif config["warn_low"] and value <= config["warn_low"]:
+        elif config["warn_low"] is not None and value <= config["warn_low"]:
             severity = SeverityLevel.WARNING
             direction = f"below normal range ({value} ≤ {config['warn_low']})"
-        elif config["warn_high"] and value >= config["warn_high"]:
+        elif config["warn_high"] is not None and value >= config["warn_high"]:
             severity = SeverityLevel.WARNING
             direction = f"above normal range ({value} ≥ {config['warn_high']})"
 
