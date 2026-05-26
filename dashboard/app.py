@@ -28,6 +28,8 @@ from data_logger import DataLogger
 app = Flask(__name__)
 
 # ─── Global State ──────────────────────────────────────────────────────────────
+state_lock = threading.Lock()
+
 state = {
     "latest_reading": {},
     "latest_result": {},
@@ -35,6 +37,8 @@ state = {
     "history": [],
     "scarcity_trend": [],
     "running": False,
+    "last_cycle_sec": None,
+    "last_error": None,
 }
 
 DEFAULT_READING = {
@@ -70,35 +74,44 @@ db = DataLogger("catchfade_data.db")
 def sensor_loop():
     count = 0
     while state["running"]:
-        reading = manager.collect()
-        result = detector.detect(reading)
-        db.log_reading(reading)
-        db.log_detection(result)
+        cycle_start = time.time()
+        try:
+            reading = manager.collect()
+            result = detector.detect(reading)
+            db.log_reading(reading)
+            db.log_detection(result)
 
-        count += 1
-        briefing = None
-        if count % 10 == 0 or result.overall_severity in ["CRITICAL", "EMERGENCY"]:
-            briefing = generator.generate(result, reading)
-            db.log_briefing(briefing)
-            state["latest_briefing"] = briefing.to_dict()
+            count += 1
+            briefing = None
+            if count % 10 == 0 or result.overall_severity in ["CRITICAL", "EMERGENCY"]:
+                briefing = generator.generate(result, reading)
+                db.log_briefing(briefing)
 
-        r = reading.to_dict()
-        d = result.to_dict()
+            r = reading.to_dict()
+            d = result.to_dict()
 
-        state["latest_reading"] = r
-        state["latest_result"] = d
-        state["history"].append({**r, "severity": d["overall_severity"], "scarcity": d["scarcity_score"]})
-        if len(state["history"]) > 100:
-            state["history"] = state["history"][-100:]
+            with state_lock:
+                if briefing:
+                    state["latest_briefing"] = briefing.to_dict()
+                state["latest_reading"] = r
+                state["latest_result"] = d
+                state["history"].append({**r, "severity": d["overall_severity"], "scarcity": d["scarcity_score"]})
+                if len(state["history"]) > 100:
+                    state["history"] = state["history"][-100:]
 
-        state["scarcity_trend"].append({
-            "timestamp": r["timestamp"],
-            "scarcity_score": d["scarcity_score"],
-            "stress_index": d["stress_index"],
-            "severity": d["overall_severity"],
-        })
-        if len(state["scarcity_trend"]) > 50:
-            state["scarcity_trend"] = state["scarcity_trend"][-50:]
+                state["scarcity_trend"].append({
+                    "timestamp": r["timestamp"],
+                    "scarcity_score": d["scarcity_score"],
+                    "stress_index": d["stress_index"],
+                    "severity": d["overall_severity"],
+                })
+                if len(state["scarcity_trend"]) > 50:
+                    state["scarcity_trend"] = state["scarcity_trend"][-50:]
+                state["last_cycle_sec"] = round(time.time() - cycle_start, 3)
+                state["last_error"] = None
+        except Exception as e:
+            with state_lock:
+                state["last_error"] = str(e)
 
         time.sleep(5)
 
@@ -297,6 +310,34 @@ refresh();
 
 # ─── API Routes ────────────────────────────────────────────────────────────────
 
+def get_state_snapshot():
+    with state_lock:
+        return {
+            "latest_reading": dict(state["latest_reading"]),
+            "latest_result": dict(state["latest_result"]),
+            "latest_briefing": dict(state["latest_briefing"]),
+            "history": list(state["history"]),
+            "scarcity_trend": list(state["scarcity_trend"]),
+            "running": state["running"],
+            "last_cycle_sec": state["last_cycle_sec"],
+            "last_error": state["last_error"],
+        }
+
+@app.route('/api/health')
+def api_health():
+    snap = get_state_snapshot()
+    latest = snap["latest_reading"].get("timestamp")
+    return jsonify({
+        "status": "ok" if snap["running"] and snap["last_error"] is None else "degraded",
+        "running": snap["running"],
+        "last_cycle_sec": snap["last_cycle_sec"],
+        "last_error": snap["last_error"],
+        "latest_timestamp": latest,
+        "history_size": len(snap["history"]),
+        "trend_size": len(snap["scarcity_trend"]),
+    })
+
+
 @app.route("/")
 def index():
     return render_template_string(DASHBOARD_HTML)
@@ -313,7 +354,8 @@ def api_status():
 
 @app.route("/api/history")
 def api_history():
-    return jsonify(state["scarcity_trend"][-20:])
+    snap = get_state_snapshot()
+    return jsonify(snap["scarcity_trend"][-20:])
 
 @app.route("/api/briefing")
 def api_briefing():
@@ -335,7 +377,8 @@ def api_health():
 # ─── Entry Point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    state["running"] = True
+    with state_lock:
+        state["running"] = True
     t = threading.Thread(target=sensor_loop, daemon=True)
     t.start()
     print("\n╔══════════════════════════════════════════╗")
